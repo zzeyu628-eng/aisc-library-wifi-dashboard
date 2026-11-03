@@ -1,0 +1,75 @@
+{
+  "rows": 51065,
+  "date_min": "2018-01-01",
+  "date_max": "2021-12-31",
+  "n_months": 48,
+  "split_cut": "2021-03-15",
+  "n_train": 40845,
+  "n_hold": 10220,
+  "model_name": "HistGradientBoostingRegressor",
+  "mae_model": 152.7439,
+  "mae_baseline_same_dow": 171.3563,
+  "mae_improvement": 18.6124,
+  "mae_rel_improvement_pct": 10.86,
+  "mae_baseline_recent28d_same_dow": 146.7509,
+  "mae_baseline_2019_same_month_dow": 147.1206,
+  "model_beats_all_baselines": false,
+  "train_mean_user_count": 89.7,
+  "hold_mean_user_count": 221.39,
+  "insights": {
+    "term_vs_summer_weekday_2018": 4.599,
+    "term_vs_summer_weekday_2019": 4.445,
+    "term_vs_summer_weekday_by_floor_2019": {
+      "1": 3.899,
+      "G": 3.642,
+      "LG1": 4.938,
+      "LG3": 3.382,
+      "LG4": 6.725
+    },
+    "term_vs_summer_top_floor": "LG4",
+    "term_vs_summer_low_floor": "LG3",
+    "exam_proxy_may_vs_marapr_weekday_2019": 0.845,
+    "y2020_vs_1819_mean_drop_pct": -67.34,
+    "y2020_vs_1819_total_drop_pct": -75.84,
+    "y2020_worst_month": 2,
+    "y2020_worst_month_drop_pct": -94.5,
+    "y2020_vs_1819_median_drop_pct": -73.19,
+    "y2020_months_below_minus50": 9,
+    "ug_peak_floor": "LG1",
+    "rpg_peak_floor": "LG3",
+    "ug_peak_floor_1819": "LG1",
+    "rpg_peak_floor_1819": "LG1",
+    "ug_weekend_retention": 0.3626,
+    "rpg_weekend_retention": 0.5865,
+    "ug_weekend_retention_by_year": {
+      "2018": 0.359,
+      "2019": 0.333,
+      "2020": 0.467,
+      "2021": 0.377
+    },
+    "rpg_weekend_retention_by_year": {
+      "2018": 0.62,
+      "2019": 0.561,
+      "2020": 0.577,
+      "2021": 0.59
+    },
+    "non_hkust_weekday_share_term_vs_summer_2018": [
+      2.037,
+      3.552
+    ],
+    "non_hkust_weekday_share_term_vs_summer_2019": [
+      2.537,
+      4.558
+    ],
+    "non_hkust_share_by_year": {
+      "2018": 1.999,
+      "2019": 2.878,
+      "2020": 1.987,
+      "2021": 5.234
+    },
+    "non_hkust_last_year_peak_month": 9,
+    "non_hkust_last_year_peak_month_volume_pct": 45.2,
+    "non_hkust_last_year_share_excl_peak_month": 3.592,
+    "non_hkust_last_year_q4_share": 1.617
+  }
+}
