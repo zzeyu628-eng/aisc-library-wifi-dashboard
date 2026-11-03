@@ -16,3 +16,5 @@
 - Data path is `./data/wifi_clean.parquet` relative to repo root (same folder as `app.py`).
 - File size of the parquet is ~1.7 MB — fine for GitHub.
 - If the app shows “Missing … wifi_clean.parquet”, confirm `data/wifi_clean.parquet` is committed and the Main file path is exactly `app.py` at repo root.
+- `runtime.txt` is `python-3.12` (a Streamlit-supported runtime with pyarrow wheels).
+- `requirements.txt` no longer caps `pyarrow` at `<20`. On the Python 3.14 image, that cap resolved to `pyarrow==19.0.1`, which has no cp314 wheel, so `uv` tried to build from source and failed (`cmake` missing). Without the cap, install uses a release that publishes wheels. After this is on `main`, **Reboot** the app so Cloud reinstalls dependencies.

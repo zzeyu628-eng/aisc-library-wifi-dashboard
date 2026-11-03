@@ -26,7 +26,8 @@ streamlit run app.py
 
 ```text
 app.py                 # Streamlit entry
-requirements.txt
+requirements.txt       # lower bounds only (Cloud-friendly)
+runtime.txt            # python-3.12 hint
 metrics.json           # snapshot metrics (insights also computed live in app)
 data/wifi_clean.parquet
 .streamlit/config.toml
