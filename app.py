@@ -3,12 +3,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import sys
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
-ROOT = Path(__file__).resolve().parent  # Streamlit Cloud: app.py at repo root; data/ beside it
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # so `theme` imports under export_metrics too
+import theme as T  # noqa: E402  (visual system only: tokens, CSS, Plotly template, bilingual labels)
+
+ROOT = Path(__file__).resolve().parent  # click-open deploy pack: data/ beside app.py
 DATA_PATH = ROOT / "data" / "wifi_clean.parquet"
 DOW_LABELS = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
 DOI = "doi:10.14711/dataset/RQXRQB"
@@ -27,7 +33,7 @@ except Exception:  # pragma: no cover
 @st.cache_data
 def load_data() -> pd.DataFrame:
     if not DATA_PATH.exists():
-        st.error(f"Missing {DATA_PATH}. Run: python scripts/merge_wifi.py")
+        st.error(f"Missing {DATA_PATH}. Run: python scripts/merge_wifi.py · 缺少数据文件，请先运行 python scripts/merge_wifi.py")
         st.stop()
     df = pd.read_parquet(DATA_PATH)
     df["Date"] = pd.to_datetime(df["Date"])
@@ -380,13 +386,228 @@ def compute_insights(df: pd.DataFrame) -> list[dict]:
     return insights
 
 
-def main() -> None:
-    st.set_page_config(page_title="Library Wi-Fi Predictive Advanced", layout="wide")
-    st.title("HKUST Library Wi-Fi Occupancy Explorer")
-    st.caption(
-        "AISC1000B · GenZ glasses · Predictive Advanced — interactive infographics + "
-        "non-trivial insights + sklearn forecast"
+# ============================================================================
+# Presentation layer (taste-skill achromatic-ledger + impeccable polish, 2026-11-03).
+# Everything above this line is the reviewed data/model logic and is unchanged;
+# everything below only arranges and draws it.
+# ============================================================================
+import html as _html_mod  # noqa: E402
+
+
+def predict_grid(model, meta, floor: str, group: str, dows, months) -> np.ndarray:
+    """Vectorised `predict_user_count` for many (dow, month) cells of one Floor × User-Group.
+
+    Builds exactly the same feature rows as `predict_user_count`, so each value equals the
+    single-cell prediction (asserted in the harness check, docs/taste-pass/).
+    """
+    rows = pd.DataFrame(
+        {
+            "Floor": floor,
+            "User-Group": group,
+            "dow": [int(d) for d in dows],
+            "month": [int(m) for m in months],
+        }
     )
+    rows["is_weekend"] = rows["dow"].isin((5, 6))
+    X = _encode_features(rows, meta["floor_cats"], meta["group_cats"])
+    return model.predict(X).astype(float)
+
+
+@st.cache_data
+def seasonal_2019_means(df: pd.DataFrame, cut: str) -> pd.Series:
+    """Observed 2019 Floor × Group × month × dow mean, train window only (= the seasonal baseline)."""
+    tr = df[(df["Date"] < pd.Timestamp(cut)) & (df["Date"].dt.year == 2019)]
+    return tr.groupby(["Floor", "User-Group", "month", "dow"])["User-Count"].mean()
+
+
+def _md(body: str) -> None:
+    st.markdown(body, unsafe_allow_html=True)
+
+
+def _esc(s: str) -> str:
+    return _html_mod.escape(str(s), quote=False)
+
+
+def insight_headline(ins: dict) -> tuple[str, str]:
+    """Large figure + its caption for an insight card, read from the insight's own `values`."""
+    v = ins.get("values", {})
+    if "term_vs_summer_weekday_2018" in v:
+        return (
+            f"{v['term_vs_summer_weekday_2018']:.2f}× / {v['term_vs_summer_weekday_2019']:.2f}×",
+            "Term ÷ summer weekday load, 2018 / 2019 · 学期 ÷ 暑假 工作日人数（2018 / 2019）",
+        )
+    if "y2020_vs_1819_mean_drop_pct" in v:
+        return (
+            f"{v['y2020_vs_1819_mean_drop_pct']:.1f}%",
+            "2020 vs 2018–19, mean same-month change · 2020 相对 2018–19 同月平均变化",
+        )
+    if "ug_weekend_retention" in v:
+        return (
+            f"{v['ug_weekend_retention']:.0%} vs {v['rpg_weekend_retention']:.0%}",
+            "Weekend ÷ weekday, UG vs RPG · 周末 ÷ 工作日：本科生 vs 研究型研究生",
+        )
+    if "non_hkust_weekday_share_term_vs_summer_2019" in v:
+        t, s = v["non_hkust_weekday_share_term_vs_summer_2019"]
+        return f"{t:.2f}% → {s:.2f}%", "Non-HKUST guest weekday share, term → summer 2019 · 2019 校外访客工作日占比：学期 → 暑假"
+    return "", ""
+
+
+def _kpi_strip(items: list[tuple[str, str, str]]) -> None:
+    cells = "".join(
+        f"<div class='kpi'><div class='l'>{_esc(l)}</div><div class='v'>{_esc(v)}</div>"
+        f"<div class='s'>{_esc(s)}</div></div>"
+        for l, v, s in items
+    )
+    _md(f"<div class='kpis'>{cells}</div>")
+
+
+def _plot(fig: go.Figure, key: str) -> None:
+    st.plotly_chart(fig, width="stretch", theme=None, config=T.PLOTLY_CONFIG, key=key)
+
+
+# ---------------------------------------------------------------- charts
+def fig_heatmap(fdf: pd.DataFrame) -> go.Figure:
+    heat = fdf.groupby(["Floor", "dow"], as_index=False)["User-Count"].mean()
+    pivot = heat.pivot(index="Floor", columns="dow", values="User-Count").reindex(columns=range(7))
+    pivot = pivot.dropna(axis=1, how="all")
+    fig = go.Figure(
+        go.Heatmap(
+            z=pivot.values,
+            x=[T.dow_label(int(d)).replace(" ", "<br>") for d in pivot.columns],
+            y=[f"{f}" for f in pivot.index],
+            colorscale=[[i / (len(T.SEQ_BLUE) - 1), c] for i, c in enumerate(T.SEQ_BLUE)],
+            texttemplate="%{z:.0f}",
+            textfont=dict(size=12),
+            xgap=2,
+            ygap=2,
+            colorbar=dict(title=dict(text="Mean users<br>平均人数", font=dict(size=11, color=T.MUTED)), thickness=10),
+            hovertemplate="Floor 楼层 %{y} · %{x}<br>Mean User-Count 平均人数 %{z:.1f}<extra></extra>",
+        )
+    )
+    fig.update_yaxes(autorange="reversed", showline=False, title_text="Floor · 楼层", showgrid=False)
+    fig.update_xaxes(showline=False)
+    return T.finish(fig, "(a) Floor × weekday heatmap (mean User-Count)", "楼层 × 星期 热力图（平均人数）", height=380)
+
+
+def fig_buckets(fdf: pd.DataFrame) -> go.Figure | None:
+    focus = {"UG", "RPG", "TPG", "Staff"}
+    bar_df = fdf[fdf["User-Group"].isin(focus)].copy()
+    if bar_df.empty:
+        return None
+    bar_df["bucket"] = bar_df["User-Group"].map(
+        lambda g: "UG" if g == "UG" else ("Staff" if g == "Staff" else "PG (RPG+TPG)")
+    )
+    bar = bar_df.groupby(["Floor", "bucket"], as_index=False)["User-Count"].mean()
+    fig = go.Figure()
+    for b in ["UG", "PG (RPG+TPG)", "Staff"]:
+        sub = bar[bar["bucket"] == b]
+        if sub.empty:
+            continue
+        fig.add_bar(
+            x=sub["Floor"], y=sub["User-Count"], name=T.group_label(b), marker_color=T.BUCKET_COLORS[b],
+            hovertemplate=f"{T.group_label(b)} · Floor 楼层 %{{x}}<br>Mean User-Count 平均人数 %{{y:.1f}}<extra></extra>",
+        )
+    fig.update_layout(barmode="group", barcornerradius=3)
+    fig.update_xaxes(title_text="Floor · 楼层")
+    fig.update_yaxes(title_text="Mean User-Count · 平均人数", rangemode="tozero")
+    return T.finish(fig, "(c) UG vs PG/Staff mean User-Count by Floor", "各楼层：本科生 vs 研究生 / 教职员 平均人数", height=380)
+
+
+def fig_series(fdf: pd.DataFrame, smooth: bool) -> go.Figure:
+    ts = fdf.groupby(["Date", "User-Group"], as_index=False)["User-Count"].sum()
+    if smooth:
+        ts = ts.sort_values("Date")
+        ts["User-Count"] = ts.groupby("User-Group")["User-Count"].transform(
+            lambda s: s.rolling(7, min_periods=1).mean()
+        )
+    fig = go.Figure()
+    order = [g for g in T.GROUP_COLORS if g in set(ts["User-Group"])] + sorted(
+        set(ts["User-Group"]) - set(T.GROUP_COLORS)
+    )
+    for g in order:
+        sub = ts[ts["User-Group"] == g]
+        fig.add_scatter(
+            x=sub["Date"], y=sub["User-Count"], mode="lines", name=T.group_label(g),
+            line=dict(width=1.4, color=T.GROUP_COLORS.get(g, T.FAINT)),
+            hovertemplate=f"{T.group_label(g)}: %{{y:,.0f}}<extra></extra>",
+        )
+    # Evidence beside the data: the counting-definition change noted in the insights caption.
+    change = pd.Timestamp("2018-11-05")
+    if len(ts) and ts["Date"].min() <= change <= ts["Date"].max():
+        fig.add_shape(type="line", x0=change, x1=change, y0=0, y1=1, yref="paper",
+                      line=dict(color=T.FAINT, width=1, dash="dot"))
+        fig.add_annotation(x=change, y=1, yref="paper", text="counting change · 计数口径变化",
+                           showarrow=False, xanchor="left", yanchor="top", xshift=4,
+                           font=dict(size=11, color=T.MUTED))
+    fig.update_layout(hovermode="x unified")
+    fig.update_yaxes(title_text="User-Count · 人数", rangemode="tozero", tickformat=",")
+    fig.update_xaxes(title_text="")
+    sub = "各用户群每日总人数" + ("（7 日滚动均值）" if smooth else "")
+    title = "(b) Daily total User-Count by User-Group" + (" — 7-day rolling mean" if smooth else "")
+    return T.finish(fig, title, sub, height=420)
+
+
+def fig_pred_months(yhat_m, obs_m, base_pred, p_month, scope: str) -> go.Figure:
+    months = list(range(1, 13))
+    fig = go.Figure()
+    fig.add_shape(type="rect", x0=p_month - 0.5, x1=p_month + 0.5, y0=0, y1=1, yref="paper",
+                  fillcolor=T.HUE_TINT, line=dict(width=0), layer="below")
+    fig.add_scatter(
+        x=months, y=[base_pred] * 12, mode="lines", name="Same-dow baseline · 同星期基线",
+        line=dict(color=T.FAINT, width=1.5, dash="dot"),
+        hovertemplate="Same-dow baseline 同星期基线: %{y:.1f}<extra></extra>",
+    )
+    fig.add_scatter(
+        x=months, y=obs_m, mode="markers", name="2019 observed mean · 2019 实测均值",
+        marker=dict(size=8, color=T.SURFACE, line=dict(color=T.MUTED, width=1.5)),
+        hovertemplate="2019 observed mean 2019 实测均值: %{y:.1f}<extra></extra>",
+    )
+    fig.add_scatter(
+        x=months, y=yhat_m, mode="lines+markers", name="Model forecast · 模型预测",
+        line=dict(color=T.HUE, width=2.5), marker=dict(size=7, color=T.HUE, line=dict(color=T.SURFACE, width=1.5)),
+        hovertemplate="Model forecast 模型预测: %{y:.1f}<extra></extra>",
+    )
+    sel = float(yhat_m[p_month - 1])
+    fig.add_scatter(
+        x=[p_month], y=[sel], mode="markers+text", showlegend=False, hoverinfo="skip",
+        marker=dict(size=15, color=T.HUE, line=dict(color=T.SURFACE, width=2.5)),
+        text=[f"<b>{sel:.0f}</b>"], textposition="top center", textfont=dict(size=13, color=T.INK),
+    )
+    fig.update_xaxes(tickvals=months, ticktext=[f"{T.MONTH_EN[m - 1]}<br>{m}月" for m in months],
+                     range=[0.5, 12.5], title_text="Month · 月份")
+    ymax = np.nanmax([np.nanmax(yhat_m), np.nanmax(obs_m) if np.isfinite(np.nanmax(obs_m)) else 0, base_pred])
+    fig.update_yaxes(title_text="User-Count · 人数", range=[0, ymax * 1.18 + 1])
+    fig.update_layout(hovermode="x unified")
+    return T.finish(fig, "Forecast by month · 各月份预测",
+                    f"{scope} · shaded = selected 阴影为选中月", height=360)
+
+
+def fig_pred_weekdays(yhat_w, base_w, p_dow, p_month) -> go.Figure:
+    labels = [T.dow_label(d).replace(" ", "<br>") for d in range(7)]
+    sel = [y if d == p_dow else None for d, y in enumerate(yhat_w)]
+    oth = [None if d == p_dow else y for d, y in enumerate(yhat_w)]
+    fig = go.Figure()
+    fig.add_bar(x=labels, y=oth, name="Other days · 其他日", marker_color=T.NEUTRAL_BAR,
+                hovertemplate="Model forecast 模型预测: %{y:.1f}<extra></extra>")
+    fig.add_bar(x=labels, y=sel, name="Selected day · 选中日", marker_color=T.HUE,
+                text=[f"{v:.0f}" if v is not None else "" for v in sel], textposition="outside",
+                textfont=dict(size=13, color=T.INK), cliponaxis=False,
+                hovertemplate="Model forecast 模型预测: %{y:.1f}<extra></extra>")
+    fig.add_scatter(x=labels, y=base_w, mode="markers", name="Same-dow baseline · 同星期基线",
+                    marker=dict(symbol="line-ew-open", size=30, color=T.INK, line=dict(color=T.INK, width=2)),
+                    hovertemplate="Same-dow baseline 同星期基线: %{y:.1f}<extra></extra>")
+    fig.update_layout(barmode="overlay", barcornerradius=3, bargap=0.3)
+    ymax = np.nanmax([np.nanmax(yhat_w), np.nanmax(base_w)])
+    fig.update_yaxes(title_text="User-Count · 人数", range=[0, ymax * 1.2 + 1])
+    fig.update_xaxes(title_text="")
+    return T.finish(fig, "Forecast by weekday · 各星期预测",
+                    f"{T.month_label(p_month)} · blue = selected 蓝色为选中日", height=360)
+
+
+# ---------------------------------------------------------------- page
+def main() -> None:
+    st.set_page_config(page_title="Library Wi-Fi Dashboard · 图书馆 Wi-Fi 看板", layout="wide")
+    st.html(T.CSS)
 
     df = load_data()
     floors_all = sorted(df["Floor"].unique().tolist())
@@ -395,94 +616,130 @@ def main() -> None:
     n_months = df["Date"].dt.to_period("M").nunique()
 
     with st.sidebar:
-        st.header("Filters")
-        date_range = st.date_input("Date range", value=(dmin, dmax), min_value=dmin, max_value=dmax)
-        floors = st.multiselect("Floor", floors_all, default=floors_all)
-        groups = st.multiselect("User-Group", groups_all, default=groups_all)
+        st.header("Filters · 筛选")
+        date_range = st.date_input("Date range · 日期范围", value=(dmin, dmax), min_value=dmin, max_value=dmax)
+        floors = st.multiselect("Floor · 楼层", floors_all, default=floors_all)
+        groups = st.multiselect("User-Group · 用户群", groups_all, default=groups_all, format_func=T.group_label)
 
-        st.header("Predict controls")
-        p_floor = st.selectbox("Floor (predict)", floors_all, index=0)
+        st.header("Predict controls · 预测设置")
+        p_floor = st.selectbox("Floor (predict) · 楼层（预测）", floors_all, index=0)
         p_group = st.selectbox(
-            "User-Group (predict)",
+            "User-Group (predict) · 用户群（预测）",
             groups_all,
             index=groups_all.index("UG") if "UG" in groups_all else 0,
+            format_func=T.group_label,
         )
         p_dow = st.selectbox(
-            "Day of week",
+            "Day of week · 星期",
             options=list(range(7)),
-            format_func=lambda i: DOW_LABELS[i],
+            format_func=T.dow_label,
             index=0,
         )
-        p_month = st.slider("Month", min_value=1, max_value=12, value=10)
+        p_month = st.slider("Month · 月份", min_value=1, max_value=12, value=10)
 
         st.markdown("---")
         st.caption(
             f"**Data source:** HKUST Library Wi-Fi Usage "
             f"([{DOI}]({SOURCE_URL})). "
             f"Cleaned rows: {len(df):,} · {dmin} → {dmax} · {n_months} months. "
-            "Aggregates All-Floors / Total dropped."
+            "Aggregates All-Floors / Total dropped.\n\n"
+            f"**数据来源：** 香港科技大学图书馆 Wi-Fi 使用数据（[{DOI}]({SOURCE_URL})）。"
+            f"清洗后 {len(df):,} 行 · {dmin} → {dmax} · 共 {n_months} 个月。"
+            "已去除 All-Floors / Total 汇总行。"
         )
 
     fdf = filter_df(df, date_range, floors, groups)
-    st.write(
-        f"**Rows:** {len(fdf):,} · **Dates:** "
-        f"{fdf['Date'].min().date() if len(fdf) else '—'} → "
-        f"{fdf['Date'].max().date() if len(fdf) else '—'} · "
-        f"**Months in full set:** {n_months}"
-    )
+    insights = compute_insights(df)
+    ivals: dict = {}
+    for ins in insights:
+        ivals.update(ins["values"])
 
-    # Insights
-    st.subheader("Non-Trivial Insights（非平凡洞察）")
+    # ---- title row: what this is + the one finding
+    st.title("HKUST Library Wi-Fi Occupancy Explorer · 港科大图书馆 Wi-Fi 使用探索")
+    _md(
+        "<p class='lede'>AISC1000B · GenZ glasses · Predictive Advanced — interactive infographics, "
+        "non-trivial insights and an sklearn User-Count forecast.<br>"
+        "AISC1000B · GenZ glasses · 预测进阶 —— 互动信息图、非平凡洞察与 sklearn 人数预测。</p>"
+    )
+    if "term_vs_summer_weekday_2018" in ivals and "y2020_vs_1819_mean_drop_pct" in ivals:
+        r18, r19 = ivals["term_vs_summer_weekday_2018"], ivals["term_vs_summer_weekday_2019"]
+        d20 = ivals["y2020_vs_1819_mean_drop_pct"]
+        _md(
+            f"<p class='finding'>Teaching-term weekdays carry <b>{r18:.2f}×</b> (2018) and <b>{r19:.2f}×</b> (2019) "
+            f"the summer-break load, and 2020 same-month use averaged <b>{d20:.1f}%</b> against 2018–19. "
+            f"<br><span style='color:var(--muted)'>学期工作日人数为暑假的 {r18:.2f} 倍（2018）/ {r19:.2f} 倍（2019）；"
+            f"2020 年同月平均变化 {d20:.1f}%。</span></p>"
+        )
+
+    # ---- KPI strip for the current filter view (type, not tiles)
+    if len(fdf):
+        daily = fdf.groupby("Date")["User-Count"].sum()
+        peak_day, peak_v = daily.idxmax(), daily.max()
+        f0, f1 = fdf["Date"].min().date(), fdf["Date"].max().date()
+        kpis = [
+            ("Rows in view · 当前行数", f"{len(fdf):,}", f"of {len(df):,} cleaned rows · 共 {len(df):,} 行清洗数据"),
+            ("Dates in view · 日期", f"{(f1 - f0).days + 1:,} days · 天", f"{f0} → {f1}"),
+            ("Months in full set · 全集月份", f"{n_months}", f"{dmin.year}–{dmax.year}"),
+            ("Mean User-Count · 平均人数", f"{fdf['User-Count'].mean():.1f}", "per floor × group × day · 每楼层×用户群×日"),
+            ("Busiest day in view · 最忙一天", f"{peak_v:,.0f}", f"{peak_day.date()} · {T.dow_label(peak_day.dayofweek)}"),
+        ]
+    else:
+        kpis = [("Rows in view · 当前行数", "0", f"of {len(df):,} cleaned rows · 共 {len(df):,} 行清洗数据")] + [
+            (l, "—", "no rows match the filters · 无匹配数据") for l in
+            ("Dates in view · 日期", "Months in full set · 全集月份", "Mean User-Count · 平均人数", "Busiest day in view · 最忙一天")
+        ]
+    _kpi_strip(kpis)
+
+    # ---- insights
+    _md("<div class='section-gap'></div>")
+    st.subheader("Non-Trivial Insights · 非平凡洞察")
     st.caption(
         "Auto-calculated from wifi_clean — not hand-picked anecdotes. Data-quality notes: counting definition "
         "changes on 2018-11-05 (daily total doubles overnight; WiFi-Conn per user 3.0→5.3) and again in 2021; "
-        "29 dates have an all-zero total (2021-02-12→03-02, 2021-06-12→14, 2021-12-25→31: closure or logging gap)."
+        "29 dates have an all-zero total (2021-02-12→03-02, 2021-06-12→14, 2021-12-25→31: closure or logging gap).\n\n"
+        "由 wifi_clean 自动计算，并非人工挑选的个例。数据质量说明：2018-11-05 起计数口径变化（每日总数一夜翻倍；"
+        "每用户 WiFi-Conn 由 3.0 升至 5.3），2021 年再次变化；29 个日期总数全为 0（2021-02-12→03-02、"
+        "2021-06-12→14、2021-12-25→31：闭馆或记录缺失）。"
     )
-    for i, ins in enumerate(compute_insights(df), start=1):
-        with st.container():
-            st.markdown(f"**{i}. {ins['title_en']} / {ins['title_zh']}**")
-            st.write(ins["body_en"])
-            st.write(ins["body_zh"])
+    for row_start in range(0, len(insights), 2):
+        cols = st.columns(2, gap="small")
+        for j, ins in enumerate(insights[row_start:row_start + 2]):
+            i = row_start + j + 1
+            fig_txt, fig_cap = insight_headline(ins)
+            with cols[j].container(border=True, key=f"card_ins{i}"):
+                _md(
+                    (f"<div class='ins-fig'>{_esc(fig_txt)}</div><div class='ins-figcap'>{_esc(fig_cap)}</div>" if fig_txt else "")
+                    + f"<div class='ins-title'>{i}. {_esc(ins['title_en'])} <span class='zh'>/ {_esc(ins['title_zh'])}</span></div>"
+                    + f"<p class='ins-en'>{_esc(ins['body_en'])}</p>"
+                    + f"<p class='ins-zh'>{_esc(ins['body_zh'])}</p>"
+                )
 
-    # (a) Floor × dow heatmap
-    st.subheader("(a) Floor × weekday heatmap (mean User-Count)")
-    if len(fdf):
-        heat = (
-            fdf.groupby(["Floor", "dow"], as_index=False)["User-Count"]
-            .mean()
-            .assign(weekday=lambda x: x["dow"].map(DOW_LABELS))
-        )
-        pivot = heat.pivot(index="Floor", columns="weekday", values="User-Count")
-        cols = [DOW_LABELS[i] for i in range(7) if DOW_LABELS[i] in pivot.columns]
-        pivot = pivot.reindex(columns=cols)
-        fig_h = px.imshow(
-            pivot, aspect="auto", color_continuous_scale="YlOrRd", labels=dict(color="User-Count")
-        )
-        st.plotly_chart(fig_h, use_container_width=True)
+    # ---- patterns
+    _md("<div class='section-gap'></div>")
+    st.subheader("Patterns · 使用规律")
+    st.caption("These three charts follow the sidebar filters (date range, Floor, User-Group).\n\n以下三张图随侧栏筛选（日期范围、楼层、用户群）变化。")
+    if not len(fdf):
+        st.info("No data for the current filters — widen the date range or add a Floor / User-Group.\n\n当前筛选没有数据——请放宽日期范围，或加入楼层 / 用户群。")
     else:
-        st.info("No data for current filters.")
+        c_left, c_right = st.columns([3, 2], gap="small")
+        with c_left.container(border=True, key="card_heat"):
+            _plot(fig_heatmap(fdf), "fig_heat")
+        with c_right.container(border=True, key="card_bucket"):
+            fb = fig_buckets(fdf)
+            if fb is None:
+                _md("<p class='dq'>(c) needs UG, RPG, TPG or Staff in the User-Group filter. 请在用户群筛选中加入 UG / RPG / TPG / Staff。</p>")
+            else:
+                _plot(fb, "fig_bucket")
+        with st.container(border=True, key="card_series"):
+            smooth = st.radio(
+                "Resolution · 粒度", ["Daily · 每日", "7-day mean · 7 日均值"], index=0,
+                horizontal=True, label_visibility="collapsed", key="series_res",
+            ).startswith("7")
+            _plot(fig_series(fdf, smooth), "fig_series")
 
-    # (b) time series
-    st.subheader("(b) Daily total User-Count by User-Group")
-    if len(fdf):
-        ts = fdf.groupby(["Date", "User-Group"], as_index=False)["User-Count"].sum()
-        fig_ts = px.line(ts, x="Date", y="User-Count", color="User-Group")
-        st.plotly_chart(fig_ts, use_container_width=True)
-
-    # (c) UG vs PG/Staff bar
-    st.subheader("(c) UG vs PG/Staff mean User-Count by Floor")
-    if len(fdf):
-        focus = {"UG", "RPG", "TPG", "Staff"}
-        bar_df = fdf[fdf["User-Group"].isin(focus)].copy()
-        bar_df["bucket"] = bar_df["User-Group"].map(
-            lambda g: "UG" if g == "UG" else ("Staff" if g == "Staff" else "PG (RPG+TPG)")
-        )
-        bar = bar_df.groupby(["Floor", "bucket"], as_index=False)["User-Count"].mean()
-        fig_b = px.bar(bar, x="Floor", y="User-Count", color="bucket", barmode="group")
-        st.plotly_chart(fig_b, use_container_width=True)
-
-    # Predictive panel
-    st.subheader("Predictive panel — User-Count forecast")
+    # ---- predictive panel
+    _md("<div class='section-gap'></div>")
+    st.subheader("Predictive panel — User-Count forecast · 人数预测")
     model, meta, _means = train_models(df)
     pred = predict_user_count(model, meta, p_floor, p_group, int(p_dow), int(p_month))
     # baseline for selected combo
@@ -496,27 +753,68 @@ def main() -> None:
         f"Model: **{meta['model_name']}** · features floor, user_group, dow, month, is_weekend · "
         f"time-aware split cut **{meta['cut']}** "
         f"(train {meta['n_train']:,} / holdout {meta['n_hold']:,}). "
-        "MAE = mean |y − ŷ| on holdout rows."
+        "MAE = mean |y − ŷ| on holdout rows (lower is better).\n\n"
+        f"模型：**{meta['model_name']}** · 特征：楼层、用户群、星期、月份、是否周末 · "
+        f"按时间切分，切点 **{meta['cut']}**（训练 {meta['n_train']:,} 行 / 留出 {meta['n_hold']:,} 行）。"
+        "MAE（平均绝对误差）= 留出行上 |y − ŷ| 的平均值，越低越好。"
     )
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Predicted User-Count", f"{pred:.1f}")
-    m2.metric("Same-dow baseline (selected)", f"{base_pred:.1f}")
-    m3.metric("Holdout MAE (model)", f"{meta['mae_model']:.2f}")
-    m4.metric(
-        "Holdout MAE (same-dow baseline)",
-        f"{meta['mae_baseline']:.2f}",
-        delta=f"{meta['mae_baseline'] - meta['mae_model']:.2f} vs baseline",
-        delta_color="normal",
+    scope = f"Floor 楼层 {p_floor} · {T.group_label(p_group)} · {T.dow_label(int(p_dow))}"
+    _md(
+        f"<p class='pred-scope'>Forecast for · 预测条件：<b>Floor 楼层 {_esc(p_floor)}</b><span class='sep'>·</span>"
+        f"<b>{_esc(T.group_label(p_group))}</b><span class='sep'>·</span><b>{_esc(T.dow_label(int(p_dow)))}</b>"
+        f"<span class='sep'>·</span><b>{_esc(T.month_label(int(p_month)))}</b>"
+        "<br><span style='color:var(--muted)'>Change any Predict control in the sidebar and the numbers and charts below update."
+        "<br>调整侧栏任一预测设置，下方数字与图表即时更新。</span></p>"
     )
-    st.caption(
-        f"Relative MAE reduction vs the long-run same-dow baseline: **{meta['mae_rel_improvement_pct']:.1f}%**. "
+
+    with st.container(border=True, key="card_pred"):
+        m1, m2, m3, m4 = st.columns(4)
+        with m1.container(key="kpi_pred"):
+            st.metric(
+                "Predicted User-Count · 预测人数", f"{pred:.1f}",
+                delta=f"{pred - base_pred:+.1f} vs same-dow baseline · 较同星期基线", delta_color="off",
+            )
+        m2.metric("Same-dow baseline (selected) · 同星期基线", f"{base_pred:.1f}")
+        m3.metric("Holdout MAE (model) · 模型 MAE", f"{meta['mae_model']:.2f}")
+        m4.metric(
+            "Holdout MAE (same-dow baseline) · 基线 MAE",
+            f"{meta['mae_baseline']:.2f}",
+            delta=f"{meta['mae_baseline'] - meta['mae_model']:.2f} vs baseline · 模型误差更低",
+            delta_color="normal",
+        )
+
+        # The dynamic chart: real model predictions for the selected Floor × User-Group.
+        months = list(range(1, 13))
+        yhat_m = predict_grid(model, meta, p_floor, p_group, [int(p_dow)] * 12, months)
+        s19 = seasonal_2019_means(df, meta["cut"])
+        obs_m = np.array([s19.get((p_floor, p_group, m, int(p_dow)), np.nan) for m in months], dtype=float)
+        yhat_w = predict_grid(model, meta, p_floor, p_group, list(range(7)), [int(p_month)] * 7)
+        base_w = np.array(
+            [base_means.get((p_floor, p_group, d), train_part["User-Count"].mean()) for d in range(7)], dtype=float
+        )
+        g1, g2 = st.columns([3, 2], gap="small")
+        with g1:
+            _plot(fig_pred_months(yhat_m, obs_m, base_pred, int(p_month), scope), "fig_pred_months")
+        with g2:
+            _plot(fig_pred_weekdays(yhat_w, base_w, int(p_dow), int(p_month)), "fig_pred_weekdays")
+
+    _md(
+        f"<p class='honest'>Relative MAE reduction vs the long-run same-dow baseline: <b>{meta['mae_rel_improvement_pct']:.1f}%</b>. "
         f"But two simple baselines do slightly better than the model: last-28-days same-dow mean "
-        f"MAE **{meta['mae_baseline_recent28d_same_dow']:.2f}** and 2019 same-month×dow mean MAE "
-        f"**{meta['mae_baseline_2019_same_month_dow']:.2f}** — the model has no recency/level signal, so it "
+        f"MAE <b>{meta['mae_baseline_recent28d_same_dow']:.2f}</b> and 2019 same-month×dow mean MAE "
+        f"<b>{meta['mae_baseline_2019_same_month_dow']:.2f}</b> — the model has no recency/level signal, so it "
         "under-predicts the 2021 rebound. "
         f"Absolute error stays large (holdout mean User-Count {meta['hold_mean']:.0f} vs train mean "
         f"{meta['train_mean']:.0f}: the holdout covers the 2021 rebound), so read the panel as a "
-        "typical-level estimate for a floor × group × weekday × month cell, not a precise daily forecast."
+        "typical-level estimate for a floor × group × weekday × month cell, not a precise daily forecast.</p>"
+        f"<p class='honest' style='color:var(--muted)'>相对长期同星期基线，MAE 降低 {meta['mae_rel_improvement_pct']:.1f}%；"
+        f"但两个简单基线略优于模型（近 28 天同星期均值 MAE {meta['mae_baseline_recent28d_same_dow']:.2f}，"
+        f"2019 同月×同星期均值 MAE {meta['mae_baseline_2019_same_month_dow']:.2f}）——模型没有近期水平信号，会低估 2021 年回升。"
+        "请把本面板视为某楼层×用户群×星期×月份的典型水平估计，而非精确的逐日预测。</p>"
+    )
+    _md(
+        f"<p class='foot'>Data · 数据：HKUST Library Wi-Fi Usage 港科大图书馆 Wi-Fi 使用数据 · <a href='{SOURCE_URL}' target='_blank'>{DOI}</a> · "
+        f"{len(df):,} cleaned rows 清洗后行数 · {dmin} → {dmax}</p>"
     )
 
 

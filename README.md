@@ -1,35 +1,14 @@
-# GenZ glasses — HKUST Library Wi-Fi dashboard
+---
+title: AISC1000B GenZ Library Wi-Fi Dashboard
+emoji: 👓
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: HKUST Library Wi-Fi Predictive Advanced explorer
+---
 
-Streamlit Community Cloud deploy package for the AISC1000B GenZ glasses **Library Wi-Fi Predictive Advanced** explorer.
+# AISC1000B GenZ glasses — Library Wi-Fi dashboard
 
-- Interactive filters, Plotly charts, auto-calculated insights, and an sklearn User-Count forecast.
-- Data: cleaned HKUST Library Wi-Fi usage (`data/wifi_clean.parquet`).
-
-## Main file for Streamlit Cloud
-
-Set **Main file path** to:
-
-```text
-app.py
-```
-
-## Local run
-
-From this folder (repo root):
-
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-## Layout
-
-```text
-app.py                 # Streamlit entry
-requirements.txt       # lower bounds only (Cloud-friendly)
-runtime.txt            # python-3.12 hint
-metrics.json           # snapshot metrics (insights also computed live in app)
-data/wifi_clean.parquet
-.streamlit/config.toml
-DEPLOY.md              # Cloud deploy steps
-```
+Click-to-open Streamlit deploy. Content matches the latest bilingual taste dashboard; open format only.
